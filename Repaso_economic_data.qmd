@@ -1,0 +1,175 @@
+---
+title: "Repaso_economic_data"
+format: html
+editor: visual
+embed resources = TRUE
+---
+
+## Introducción
+
+En este informe analizamos la serie de **exportaciones de EEUU a México (EXPMX)**, descargada de FRED.
+
+La métrica de error utilizada es el **MAE (Mean Absolute Error)**.\
+El pronóstico se realiza a **2 años**.
+
+## Datos
+
+```{r}
+library(tidyverse)
+library(fpp3)
+library(tidyquant)
+```
+
+```{r}
+exports <- tq_get(
+  x = "EXPMX",
+  get = "economic.data",
+  from = "1985-01-01",
+  to = "2023-07-01"
+)
+```
+
+```{r}
+# Convertir a tsibble
+exports <- exports |> 
+  mutate(date = yearmonth(date)) |> 
+  as_tsibble(index = date)
+
+exports
+```
+
+## Análisis de los datos; ¿Qué queremos predecir?
+
+```{r}
+exports |> 
+  autoplot(price)
+```
+
+La serie de **exportaciones** presenta:
+
+-   **Tendencia creciente** (a lo largo de los años).
+
+-   **Estacionalidad clara** (picos y caídas en meses específicos).
+
+-   **Variaciones aleatorias** (choques externos como crisis o COVID).
+
+## Transformación Box-Cox para estabilizar la varianza
+
+```{r}
+# Calcular lambda con método de Guerrero
+exp_lambda <- exports |>
+  features(price, features = guerrero) |>
+  pull(lambda_guerrero)
+
+exp_lambda
+```
+
+```{r}
+exports |>
+  autoplot(box_cox(price, exp_lambda))
+```
+
+## División de los datos
+
+Entrenamiento hasta julio 2021.
+
+```{r}
+exports_train <- exports |> 
+  filter_index(. ~ "2021 Jul")
+```
+
+## Ajuste de modelos
+
+```{r}
+exports_fit <- exports_train |> 
+  model(
+    snaive = SNAIVE(box_cox(price, exp_lambda)),
+    base = decomposition_model(
+      STL(box_cox(price, exp_lambda) ~ season(window = "periodic"), robust = TRUE),
+      RW(season_adjust ~ drift()),
+      SNAIVE(season_year)
+    ),
+    hw = ETS(box_cox(price, exp_lambda) ~ error("A") + trend("A") + season("A"))
+  )
+
+exports_fit
+```
+
+## Evaluación de precisión
+
+Se calcula el **MAE** para cada modelo.
+
+```{r}
+accuracy(exports_fit) |> 
+  select(.model, MAE) |> 
+  arrange(MAE)
+```
+
+## Pronósticos a 2 años
+
+```{r}
+exports_fc <- exports_fit |> 
+  forecast(h = "2 years")
+
+exports_fc |> 
+  autoplot(exports, level = NULL)
+```
+
+## Conclusiones
+
+**SNAIVE** funciona como modelo de referencia pero no captura bien la tendencia.
+
+**Base** mejora al incluir una descomposición con tendencia y estacionalidad.
+
+**Holt-Winters (ETS A,A,A)** presenta el **menor MAE**, por lo que es el modelo seleccionado.
+
+Explicación del modelo:
+
+## Holt-Winters (ETS aditivo: A, A, A)
+
+El modelo Holt-Winters es un caso del **suavizamiento exponencial** que incluye:
+
+**Componente de nivel:**\
+Representa el valor promedio de la serie en cada periodo.
+
+Se actualiza con una ponderación exponencial (los datos recientes pesan más).
+
+**Componente de tendencia (bt):**\
+Captura el crecimiento o decrecimiento en el tiempo.
+
+Puede ser **aditiva (A)** (pendiente constante) o **amortiguada (Ad)** (la pendiente se reduce con el tiempo).
+
+**Componente estacional (st):**\
+Representa los patrones que se repiten cada año/mes.
+
+Puede ser **aditiva (A)** (amplitud constante de la estacionalidad) o **multiplicativa (M)** (amplitud proporcional al nivel).
+
+En este caso usamos **aditiva** porque la estacionalidad no crece proporcionalmente con la magnitud de la serie.
+
+**Componente de error (et):**\
+La parte aleatoria que el modelo no puede explicar.
+
+Puede ser **aditivo (A)** o **multiplicativo (M)**.
+
+Usamos **aditivo** porque la variabilidad de los errores no aumenta proporcionalmente al nivel de la serie.
+
+```{r}
+exports_final_fc <- exports_final_fit |>
+  forecast(h="2 years")
+
+exports_final_fc
+
+p <- exports_final_fc |>
+  autoplot(exports, level = NULL)
+
+plotly::ggplotly(p, dynamicTicks = TRUE)
+
+```
+
+Holt-Winters ETS(A,A,A) =
+
+-   Error aditivo.
+
+-    Tendencia aditiva.
+
+-    Estacionalidad aditiva.
